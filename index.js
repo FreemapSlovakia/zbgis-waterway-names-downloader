@@ -39,7 +39,12 @@ axios
 
     let pending = 0;
 
+
     for (const feature of features) {
+      if (feature.geometry.type !== 'LineString') {
+        continue;
+      }
+
       const center = turf.along(feature, turf.length(feature) / 2);
 
       const [lon, lat] = center.geometry.coordinates;
