@@ -19,11 +19,15 @@ if (process.argv.length !== 6 || bbox.length !== 4) {
 
 axios
   .post(
-    'https://overpass-api.de/api/interpreter',
+    // 'https://overpass-api.de/api/interpreter',
+    'https://overpass.freemap.sk/api/interpreter',
     `
-      [out:json][timeout:25];
+      [out:json][timeout:120][bbox:${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}];
       (
-        way["waterway"="stream"]["name"!~".*"](${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]});
+        way["waterway"="river"]["name"!~"."];
+        way["waterway"="stream"]["name"!~"."];
+        way["waterway"="drain"]["name"!~"."];
+        way["waterway"="ditch"]["name"!~"."];
       );
       out body;
       >;
@@ -33,82 +37,92 @@ axios
   .then(async (response) => {
     const { features } = osmtogeojson(response.data);
 
+    console.error('Features:', features.length);
+
     const promises = [];
 
     let i = 0;
 
     let pending = 0;
 
-
     for (const feature of features) {
       if (feature.geometry.type !== 'LineString') {
         continue;
       }
 
-      const center = turf.along(feature, turf.length(feature) / 2);
+      const len = turf.length(feature);
 
-      const [lon, lat] = center.geometry.coordinates;
+      for (
+        let dist = len / 2 - Math.floor(len / 2);
+        dist < len;
+        dist += 1 // every kilometer
+      ) {
+        const center = turf.along(feature, dist);
 
-      // max "threads" is 10
-      while (pending > 10) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        const [lon, lat] = center.geometry.coordinates;
+
+        // max "threads" is 10
+        // ugly but works ;-)
+        while (pending > 10) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
+        pending++;
+
+        const p = axios
+          .get(
+            'https://zbgisws.skgeodesy.sk/zbgis_vodstvo_wms_featureinfo/service.svc/get',
+            {
+              params: {
+                SERVICE: 'WMS',
+                VERSION: '1.3.0',
+                REQUEST: 'GetFeatureInfo',
+                BBOX: `${lat - 0.000001},${lon - 0.000001},${lat + 0.000001},${
+                  lon + 0.0001
+                }`,
+                CRS: 'EPSG:4326',
+                WIDTH: 1,
+                HEIGHT: 1,
+                QUERY_LAYERS: 7,
+                INFO_FORMAT: 'text/plain',
+                I: 0,
+                J: 0,
+                FEATURE_COUNT: 1,
+              },
+            }
+          )
+          .then((response) => {
+            const s = response.data.split(';');
+
+            const d = {};
+
+            const half = (s.length - 1) / 2;
+
+            for (let i = 0; i < half; i++) {
+              d[s[i]] = s[i + half];
+            }
+
+            const name = d['@Vodný tok Meno, názov (prípadne kód)']
+              ?.trim()
+              .replace('N/A', '');
+
+            console.error(`Features ${i++}/${features.length}:`, name);
+
+            if (name) {
+              center.properties.name = name;
+
+              return center;
+            }
+          })
+          .catch((err) => {
+            // ignore
+          })
+          .finally(() => {
+            pending--;
+          });
+
+        promises.push(p);
       }
-
-      pending++;
-
-      const p = axios
-        .get(
-          'https://zbgisws.skgeodesy.sk/zbgis_vodstvo_wms_featureinfo/service.svc/get',
-          {
-            params: {
-              SERVICE: 'WMS',
-              VERSION: '1.3.0',
-              REQUEST: 'GetFeatureInfo',
-              BBOX: `${lat - 0.000001},${lon - 0.000001},${lat + 0.000001},${
-                lon + 0.0001
-              }`,
-              CRS: 'EPSG:4326',
-              WIDTH: 1,
-              HEIGHT: 1,
-              QUERY_LAYERS: 7,
-              INFO_FORMAT: 'text/plain',
-              I: 0,
-              J: 0,
-              FEATURE_COUNT: 1,
-            },
-          }
-        )
-        .then((response) => {
-          const s = response.data.split(';');
-
-          const d = {};
-
-          const half = (s.length - 1) / 2;
-
-          for (let i = 0; i < half; i++) {
-            d[s[i]] = s[i + half];
-          }
-
-          const name = d['@Vodný tok Meno, názov (prípadne kód)']
-            ?.trim()
-            .replace('N/A', '');
-
-          console.error(`Features ${i++}/${features.length}:`, name);
-
-          if (name) {
-            center.properties.name = name;
-
-            return center;
-          }
-        })
-        .catch((err) => {
-          // ignore
-        })
-        .finally(() => {
-          pending--;
-        });
-
-      promises.push(p);
     }
 
     return Promise.all(promises);
